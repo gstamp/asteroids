@@ -10,6 +10,7 @@ Asteroids clone built with Zig 0.15.1 and `raylib-zig`.
 - Custom stroke font rendered from line segments
 - Procedural particle effects for thrust, impacts, and explosions
 - Procedurally synthesized arcade-style sound effects
+- Periodic gravity rifts that bend trajectories and consume anything pulled into their core
 - Classic-style Asteroids rules:
   - inertia and thrust-based ship movement
   - asteroid splitting

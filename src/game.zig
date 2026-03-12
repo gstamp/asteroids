@@ -32,6 +32,17 @@ pub const ParticleKind = enum(u8) {
     flash,
 };
 
+pub const Rift = struct {
+    active: bool = false,
+    pos: common.Vec2 = common.zero(),
+    vel: common.Vec2 = common.zero(),
+    radius: f32 = 0.0,
+    strength: f32 = 0.0,
+    life: f32 = 0.0,
+    max_life: f32 = 1.0,
+    pulse: f32 = 0.0,
+};
+
 pub const Player = struct {
     pos: common.Vec2 = common.vec2(common.world_width * 0.5, common.world_height * 0.5),
     vel: common.Vec2 = common.zero(),
@@ -104,6 +115,7 @@ pub const Game = struct {
     particles: [common.max_particles]Particle,
     stars: [common.max_stars]Star,
     saucer: Saucer,
+    rift: Rift,
     score: i32,
     high_score: i32,
     lives: i32,
@@ -118,6 +130,7 @@ pub const Game = struct {
     explosion_flash_intensity: f32,
     display_phase: f32,
     initial_wave_asteroids: i32,
+    rift_spawn_timer: f32,
 
     pub fn init(seed: u64) Game {
         var game = Game{
@@ -129,6 +142,7 @@ pub const Game = struct {
             .particles = std.mem.zeroes([common.max_particles]Particle),
             .stars = std.mem.zeroes([common.max_stars]Star),
             .saucer = .{},
+            .rift = .{},
             .score = 0,
             .high_score = 0,
             .lives = 3,
@@ -143,6 +157,7 @@ pub const Game = struct {
             .explosion_flash_intensity = 0.0,
             .display_phase = 0.0,
             .initial_wave_asteroids = 4,
+            .rift_spawn_timer = 8.0,
         };
         game.seedStars();
         game.seedTitleField();
@@ -185,6 +200,8 @@ pub const Game = struct {
         self.heartbeat_timer = 0.8;
         self.heartbeat_high = false;
         self.explosion_flash_intensity = 0.0;
+        self.rift = .{};
+        self.rift_spawn_timer = self.nextRiftDelay();
         self.player = .{};
         self.player.alive = true;
         self.player.invuln_timer = 2.5;
@@ -201,6 +218,8 @@ pub const Game = struct {
         self.score = 0;
         self.wave_message_timer = 0.0;
         self.saucer_spawn_timer = 99.0;
+        self.rift = .{};
+        self.rift_spawn_timer = 99.0;
         for (0..7) |_| {
             const pos = common.vec2(self.randRange(0.0, common.world_width), self.randRange(0.0, common.world_height));
             const angle = self.randRange(0.0, common.tau);
@@ -229,6 +248,7 @@ pub const Game = struct {
         self.bullets = std.mem.zeroes([common.max_bullets]Bullet);
         self.particles = std.mem.zeroes([common.max_particles]Particle);
         self.saucer = .{};
+        self.rift = .{};
     }
 
     fn seedStars(self: *Game) void {
@@ -283,6 +303,7 @@ pub const Game = struct {
 
     fn updatePlayingWorld(self: *Game, dt: f32, allow_saucer_spawn: bool) void {
         self.wave_message_timer = @max(self.wave_message_timer - dt, 0.0);
+        self.updateRift(dt, allow_saucer_spawn);
         self.updateAsteroids(dt);
         if (allow_saucer_spawn and !self.saucer.active) {
             self.saucer_spawn_timer -= dt;
@@ -318,6 +339,7 @@ pub const Game = struct {
                 self.thrust_sound_timer = 0.065;
             }
         }
+        self.player.vel = common.add(self.player.vel, common.scale(self.riftAcceleration(self.player.pos, 1.0), dt));
         self.player.vel = common.scale(self.player.vel, 0.999);
         self.player.pos = common.wrapPoint(common.add(self.player.pos, common.scale(self.player.vel, dt)));
 
@@ -332,6 +354,7 @@ pub const Game = struct {
     fn updateAsteroids(self: *Game, dt: f32) void {
         for (&self.asteroids) |*asteroid| {
             if (!asteroid.active) continue;
+            asteroid.vel = common.add(asteroid.vel, common.scale(self.riftAcceleration(asteroid.pos, 0.52), dt));
             asteroid.pos = common.wrapPoint(common.add(asteroid.pos, common.scale(asteroid.vel, dt)));
             asteroid.angle += asteroid.spin * dt;
         }
@@ -345,7 +368,12 @@ pub const Game = struct {
                 bullet.active = false;
                 continue;
             }
+            bullet.vel = common.add(bullet.vel, common.scale(self.riftAcceleration(bullet.pos, 0.32), dt));
             bullet.pos = common.wrapPoint(common.add(bullet.pos, common.scale(bullet.vel, dt)));
+            if (self.rift.active and common.torusDistanceSq(bullet.pos, self.rift.pos) < common.sqr(self.rift.radius * 0.24)) {
+                bullet.active = false;
+                self.spawnRadialBurst(bullet.pos, if (bullet.owner == .player) common.rgba(180, 235, 255, 255) else common.rgba(255, 120, 210, 255), 6, 90.0);
+            }
         }
     }
 
@@ -366,6 +394,7 @@ pub const Game = struct {
         }
 
         self.saucer.pos = common.add(self.saucer.pos, common.scale(self.saucer.vel, dt));
+        self.saucer.vel = common.add(self.saucer.vel, common.scale(self.riftAcceleration(self.saucer.pos, 0.38), dt));
         if (self.saucer.pos.y < 90.0 or self.saucer.pos.y > common.world_height - 90.0) self.saucer.vel.y *= -1.0;
         if ((self.saucer.vel.x > 0.0 and self.saucer.pos.x > common.world_width + 120.0) or
             (self.saucer.vel.x < 0.0 and self.saucer.pos.x < -120.0))
@@ -394,7 +423,44 @@ pub const Game = struct {
         }
     }
 
+    fn updateRift(self: *Game, dt: f32, allow_spawn: bool) void {
+        if (self.rift.active) {
+            self.rift.life -= dt;
+            self.rift.pulse += dt * 2.2;
+            self.rift.pos = common.wrapPoint(common.add(self.rift.pos, common.scale(self.rift.vel, dt)));
+            if (self.rift.life <= 0.0) {
+                self.spawnRadialBurst(self.rift.pos, common.rgba(120, 200, 255, 255), 22, 160.0);
+                self.rift = .{};
+                self.rift_spawn_timer = self.nextRiftDelay();
+            } else if (self.randRange(0.0, 1.0) < dt * 18.0) {
+                const angle = self.randRange(0.0, common.tau);
+                const rim = self.rift.radius * self.randRange(0.4, 0.95);
+                const life = self.randRange(0.18, 0.45);
+                self.spawnParticle(.{
+                    .pos = common.wrapPoint(common.add(self.rift.pos, common.fromAngle(angle, rim))),
+                    .vel = common.fromAngle(angle + common.pi * 0.5, self.randRange(10.0, 35.0)),
+                    .angle = angle,
+                    .spin = self.randRange(-8.0, 8.0),
+                    .size = self.randRange(3.0, 6.5),
+                    .life = life,
+                    .max_life = life,
+                    .intensity = self.randRange(0.25, 0.55),
+                    .color = common.rgba(120, 180, 255, 255),
+                    .kind = .flash,
+                });
+            }
+            return;
+        }
+
+        if (!allow_spawn or self.mode != .playing or self.wave < 2) return;
+        self.rift_spawn_timer -= dt;
+        if (self.rift_spawn_timer > 0.0) return;
+        self.spawnRift();
+    }
+
     fn updateCollisions(self: *Game, bank: *audio.AudioBank) void {
+        self.consumeRiftVictims(bank);
+
         for (&self.bullets) |*bullet| {
             if (!bullet.active) continue;
 
@@ -418,6 +484,11 @@ pub const Game = struct {
         }
 
         if (self.player.alive and self.player.invuln_timer <= 0.0) {
+            if (self.rift.active and common.torusDistanceSq(self.player.pos, self.rift.pos) < common.sqr(self.rift.radius * 0.24)) {
+                self.killPlayer(bank);
+                return;
+            }
+
             for (&self.asteroids) |*asteroid| {
                 if (!asteroid.active) continue;
                 if (common.torusDistanceSq(self.player.pos, asteroid.pos) < common.sqr(asteroid.radius + 14.0)) {
@@ -552,12 +623,7 @@ pub const Game = struct {
 
     fn destroySaucer(self: *Game, bank: *audio.AudioBank) void {
         const points: i32 = if (self.saucer.size == .large) 200 else 1000;
-        const old_score = self.score;
-        self.score += points;
-        if (@divTrunc(self.score, 10_000) > @divTrunc(old_score, 10_000)) {
-            self.lives += 1;
-            audio.playExtraLife(bank, 0.25, 1.0);
-        }
+        self.awardScore(points, bank);
         self.spawnRadialBurst(self.saucer.pos, common.rgba(255, 140, 220, 255), if (self.saucer.size == .large) 26 else 22, 180.0);
         self.saucer.active = false;
         self.explosion_flash_intensity = @max(self.explosion_flash_intensity, 0.25);
@@ -572,12 +638,7 @@ pub const Game = struct {
             .medium => 50,
             .small => 100,
         };
-        const old_score = self.score;
-        self.score += points;
-        if (@divTrunc(self.score, 10_000) > @divTrunc(old_score, 10_000)) {
-            self.lives += 1;
-            audio.playExtraLife(bank, 0.24, 1.0);
-        }
+        self.awardScore(points, bank);
 
         const burst_color = switch (asteroid.size) {
             .large => common.rgba(205, 228, 255, 255),
@@ -612,6 +673,39 @@ pub const Game = struct {
         _ = self.spawnAsteroid(child_size, impact_pos, common.add(common.scale(side_b, child_speed), common.scale(asteroid.vel, 0.15)));
     }
 
+    fn consumeRiftVictims(self: *Game, bank: *audio.AudioBank) void {
+        if (!self.rift.active) return;
+        const core_radius = self.rift.radius * 0.24;
+        const core_radius_sq = common.sqr(core_radius);
+
+        for (0..self.asteroids.len) |i| {
+            if (!self.asteroids[i].active) continue;
+            if (common.torusDistanceSq(self.asteroids[i].pos, self.rift.pos) >= core_radius_sq) continue;
+
+            const asteroid = self.asteroids[i];
+            self.asteroids[i].active = false;
+            self.awardScore(switch (asteroid.size) {
+                .large => 40,
+                .medium => 80,
+                .small => 140,
+            }, bank);
+            self.spawnRadialBurst(asteroid.pos, common.rgba(120, 210, 255, 255), switch (asteroid.size) {
+                .large => 18,
+                .medium => 12,
+                .small => 8,
+            }, 140.0);
+            self.explosion_flash_intensity = @max(self.explosion_flash_intensity, 0.08);
+        }
+
+        if (self.saucer.active and common.torusDistanceSq(self.saucer.pos, self.rift.pos) < common.sqr(core_radius + 10.0)) {
+            self.awardScore(if (self.saucer.size == .large) 300 else 1200, bank);
+            self.spawnRadialBurst(self.saucer.pos, common.rgba(255, 140, 220, 255), if (self.saucer.size == .large) 20 else 24, 165.0);
+            self.saucer.active = false;
+            self.explosion_flash_intensity = @max(self.explosion_flash_intensity, 0.18);
+            audio.playBangMedium(bank, 0.24, 1.15);
+        }
+    }
+
     fn spawnWave(self: *Game) void {
         self.saucer.active = false;
         self.initial_wave_asteroids = @min(4 + self.wave, 11);
@@ -635,6 +729,27 @@ pub const Game = struct {
         self.saucer.shot_timer = self.randRange(0.8, 1.4);
         self.saucer.direction_timer = self.randRange(1.0, 2.0);
         self.saucer.hum_timer = 0.05;
+    }
+
+    fn spawnRift(self: *Game) void {
+        var pos = common.zero();
+        const avoid_pos = if (self.player.alive) self.player.pos else common.vec2(common.world_width * 0.5, common.world_height * 0.5);
+        while (true) {
+            pos = common.vec2(self.randRange(180.0, common.world_width - 180.0), self.randRange(140.0, common.world_height - 140.0));
+            if (common.torusDistanceSq(pos, avoid_pos) > common.sqr(220.0)) break;
+        }
+        self.rift = .{
+            .active = true,
+            .pos = pos,
+            .vel = common.fromAngle(self.randRange(0.0, common.tau), self.randRange(8.0, 20.0)),
+            .radius = self.randRange(88.0, 118.0),
+            .strength = self.randRange(28_000.0, 36_000.0),
+            .life = self.randRange(7.0, 11.0),
+            .max_life = 11.0,
+            .pulse = self.randRange(0.0, common.tau),
+        };
+        self.rift.max_life = self.rift.life;
+        self.spawnRadialBurst(self.rift.pos, common.rgba(120, 200, 255, 255), 18, 120.0);
     }
 
     fn spawnAsteroid(self: *Game, size: AsteroidSize, pos: common.Vec2, vel: common.Vec2) bool {
@@ -718,6 +833,32 @@ pub const Game = struct {
         return self.randRange(11.0, 19.0);
     }
 
+    fn nextRiftDelay(self: *Game) f32 {
+        return self.randRange(12.0, 20.0);
+    }
+
+    fn riftAcceleration(self: *const Game, pos: common.Vec2, intensity: f32) common.Vec2 {
+        if (!self.rift.active) return common.zero();
+        const delta = common.torusDelta(pos, self.rift.pos);
+        const dist_sq = @max(common.lengthSq(delta), 144.0);
+        const dist = @sqrt(dist_sq);
+        if (dist > self.rift.radius * 2.9) return common.zero();
+
+        const falloff = std.math.clamp(1.0 - dist / (self.rift.radius * 2.9), 0.0, 1.0);
+        const swirl = common.rotate(common.normalizeOr(delta, common.vec2(1.0, 0.0), 1.0), common.pi / 2.0);
+        const pull = common.normalizeOr(delta, common.vec2(1.0, 0.0), (self.rift.strength / dist_sq) * (0.55 + falloff * 0.9) * intensity);
+        return common.add(pull, common.scale(swirl, 42.0 * (0.35 + falloff) * intensity));
+    }
+
+    fn awardScore(self: *Game, points: i32, bank: *audio.AudioBank) void {
+        const old_score = self.score;
+        self.score += points;
+        if (@divTrunc(self.score, 10_000) > @divTrunc(old_score, 10_000)) {
+            self.lives += 1;
+            audio.playExtraLife(bank, 0.24, 1.0);
+        }
+    }
+
     fn countActiveAsteroids(self: *Game) i32 {
         var total: i32 = 0;
         for (&self.asteroids) |*asteroid| {
@@ -743,6 +884,7 @@ pub const Game = struct {
         rl.beginBlendMode(.additive);
         defer rl.endBlendMode();
         drawStars(self);
+        if (self.rift.active) drawRift(self.rift, self.display_phase);
         for (self.particles) |particle| if (particle.active) drawParticle(particle);
         for (self.bullets) |bullet| if (bullet.active) drawBullet(bullet);
         for (self.asteroids) |asteroid| if (asteroid.active) drawAsteroid(asteroid);
@@ -759,6 +901,34 @@ pub const Game = struct {
         }
     }
 };
+
+fn drawRift(rift: Rift, display_phase: f32) void {
+    const envelope = std.math.clamp(@min(rift.life, rift.max_life - rift.life) / 1.2 + 0.25, 0.0, 1.0);
+    const shell_color = common.rgba(110, 190, 255, 255);
+    const core_color = common.rgba(220, 245, 255, 255);
+    const radius = rift.radius * (0.92 + 0.08 * @sin(rift.pulse));
+    const x_offsets = common.wrapOffsets(rift.pos.x, radius + 24.0, common.world_width);
+    const y_offsets = common.wrapOffsets(rift.pos.y, radius + 24.0, common.world_height);
+
+    for (x_offsets.values[0..x_offsets.len]) |ox| for (y_offsets.values[0..y_offsets.len]) |oy| {
+        const center = common.vec2(rift.pos.x + ox, rift.pos.y + oy);
+        common.drawGlowDot(center, radius * 0.22, core_color, 0.9 * envelope);
+
+        var prev = common.add(center, common.fromAngle(display_phase * 0.18, radius));
+        for (1..19) |i| {
+            const angle = display_phase * 0.18 + common.tau * (@as(f32, @floatFromInt(i)) / 18.0);
+            const next = common.add(center, common.fromAngle(angle, radius * (0.92 + 0.08 * @sin(rift.pulse * 1.6 + angle * 2.0))));
+            common.drawGlowLine(prev, next, 1.1, shell_color, 0.55 * envelope);
+            prev = next;
+        }
+
+        for (0..4) |i| {
+            const orbit = radius * (0.42 + @as(f32, @floatFromInt(i)) * 0.1);
+            const angle = rift.pulse * (0.7 + @as(f32, @floatFromInt(i)) * 0.18) + @as(f32, @floatFromInt(i)) * (common.tau / 4.0);
+            common.drawGlowDot(common.add(center, common.fromAngle(angle, orbit)), 3.2 + @as(f32, @floatFromInt(i)), shell_color, 0.55 * envelope);
+        }
+    };
+}
 
 fn drawBackground(game: *const Game) void {
     const horizon = @as(i32, @intFromFloat(90.0 + 25.0 * @sin(game.display_phase * 0.5)));
@@ -885,6 +1055,9 @@ fn drawHud(game: *const Game, render_w: f32, render_h: f32) void {
     font.drawText(high_text, uiPoint(common.world_width - 42.0, 34.0, render_w, render_h), 24.0 * zoom, 6.0 * zoom, 1.5 * zoom, .right, common.rgba(145, 180, 230, 255));
     for (0..@as(usize, @intCast(@max(game.lives, 0)))) |i| {
         drawMiniShip(uiPoint(54.0 + @as(f32, @floatFromInt(i)) * 28.0, 88.0, render_w, render_h), common.rgba(200, 230, 255, 255), zoom);
+    }
+    if (game.rift.active and game.mode == .playing) {
+        font.drawText("GRAVITY RIFT", uiPoint(common.world_width * 0.5, 34.0, render_w, render_h), 18.0 * zoom, 5.0 * zoom, 1.1 * zoom, .center, common.rgba(120, 190, 255, 255));
     }
 }
 
