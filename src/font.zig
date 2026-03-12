@@ -75,6 +75,7 @@ pub fn glyphSegments(ch: u8) []const Segment {
         'C' => glyph_C[0..],
         'D' => glyph_D[0..],
         'E' => glyph_E[0..],
+        'F' => glyph_F[0..],
         'G' => glyph_G[0..],
         'I' => glyph_I[0..],
         'L' => glyph_L[0..],
@@ -107,6 +108,7 @@ const glyph_A = [_]Segment{ seg(0.00, 1.00, 0.28, 0.00), seg(0.28, 0.00, 0.56, 0
 const glyph_C = [_]Segment{ seg(0.92, 0.08, 0.72, 0.00), seg(0.72, 0.00, 0.20, 0.00), seg(0.20, 0.00, 0.00, 0.22), seg(0.00, 0.22, 0.00, 0.80), seg(0.00, 0.80, 0.20, 1.00), seg(0.20, 1.00, 0.72, 1.00), seg(0.72, 1.00, 0.92, 0.92) };
 const glyph_D = [_]Segment{ seg(0.00, 0.00, 0.00, 1.00), seg(0.00, 0.00, 0.56, 0.00), seg(0.56, 0.00, 0.94, 0.28), seg(0.94, 0.28, 0.94, 0.72), seg(0.94, 0.72, 0.56, 1.00), seg(0.56, 1.00, 0.00, 1.00) };
 const glyph_E = [_]Segment{ seg(0.00, 0.00, 0.00, 1.00), seg(0.00, 0.00, 0.88, 0.00), seg(0.00, 0.50, 0.70, 0.50), seg(0.00, 1.00, 0.88, 1.00) };
+const glyph_F = [_]Segment{ seg(0.00, 0.00, 0.00, 1.00), seg(0.00, 0.00, 0.88, 0.00), seg(0.00, 0.50, 0.70, 0.50) };
 const glyph_G = [_]Segment{ seg(0.92, 0.10, 0.72, 0.00), seg(0.72, 0.00, 0.20, 0.00), seg(0.20, 0.00, 0.00, 0.22), seg(0.00, 0.22, 0.00, 0.80), seg(0.00, 0.80, 0.20, 1.00), seg(0.20, 1.00, 0.76, 1.00), seg(0.76, 1.00, 0.96, 0.80), seg(0.96, 0.80, 0.96, 0.58), seg(0.96, 0.58, 0.56, 0.58) };
 const glyph_I = [_]Segment{ seg(0.12, 0.00, 0.78, 0.00), seg(0.45, 0.00, 0.45, 1.00), seg(0.12, 1.00, 0.78, 1.00) };
 const glyph_L = [_]Segment{ seg(0.00, 0.00, 0.00, 1.00), seg(0.00, 1.00, 0.90, 1.00) };
@@ -137,4 +139,8 @@ fn drawStroke(a: common.Vec2, b: common.Vec2, thickness: f32, color: rl.Color) v
 
 test "measurement grows with more glyphs" {
     try std.testing.expect(measureText("WAVE", 12.0, 4.0) > measureText("WAV", 12.0, 4.0));
+}
+
+test "glyph F is defined" {
+    try std.testing.expect(glyphSegments('F').len > 0);
 }

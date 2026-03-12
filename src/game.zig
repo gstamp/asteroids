@@ -32,8 +32,14 @@ pub const ParticleKind = enum(u8) {
     flash,
 };
 
+pub const PowerupKind = enum(u8) {
+    multishot,
+    drone,
+};
+
 pub const Powerup = struct {
     active: bool = false,
+    kind: PowerupKind = .multishot,
     pos: common.Vec2 = common.zero(),
     vel: common.Vec2 = common.zero(),
     life: f32 = 0.0,
@@ -50,6 +56,19 @@ pub const Rift = struct {
     life: f32 = 0.0,
     max_life: f32 = 1.0,
     pulse: f32 = 0.0,
+};
+
+pub const Drone = struct {
+    active: bool = false,
+    timer: f32 = 0.0,
+    max_timer: f32 = 1.0,
+    orbit_angle: f32 = 0.0,
+    orbit_radius: f32 = 44.0,
+    fire_cooldown: f32 = 0.0,
+    pulse: f32 = 0.0,
+    beam_timer: f32 = 0.0,
+    beam_from: common.Vec2 = common.zero(),
+    beam_to: common.Vec2 = common.zero(),
 };
 
 pub const Player = struct {
@@ -126,6 +145,7 @@ pub const Game = struct {
     saucer: Saucer,
     rift: Rift,
     powerup: Powerup,
+    drone: Drone,
     score: i32,
     high_score: i32,
     lives: i32,
@@ -155,6 +175,7 @@ pub const Game = struct {
             .saucer = .{},
             .rift = .{},
             .powerup = .{},
+            .drone = .{},
             .score = 0,
             .high_score = 0,
             .lives = 3,
@@ -215,6 +236,7 @@ pub const Game = struct {
         self.explosion_flash_intensity = 0.0;
         self.rift = .{};
         self.powerup = .{};
+        self.drone = .{};
         self.rift_spawn_timer = self.nextRiftDelay();
         self.power_mode_timer = 0.0;
         self.player = .{};
@@ -235,6 +257,7 @@ pub const Game = struct {
         self.saucer_spawn_timer = 99.0;
         self.rift = .{};
         self.powerup = .{};
+        self.drone = .{};
         self.rift_spawn_timer = 99.0;
         self.power_mode_timer = 0.0;
         for (0..7) |_| {
@@ -267,6 +290,7 @@ pub const Game = struct {
         self.saucer = .{};
         self.rift = .{};
         self.powerup = .{};
+        self.drone = .{};
     }
 
     fn seedStars(self: *Game) void {
@@ -310,6 +334,7 @@ pub const Game = struct {
     fn updatePlaying(self: *Game, dt: f32, bank: *audio.AudioBank) void {
         self.updatePlayingWorld(dt, true);
         self.updatePlayer(dt, bank);
+        self.updateDrone(dt, bank);
         self.updateSaucer(dt, bank);
         self.updateBullets(dt);
         self.updateCollisions(bank);
@@ -471,6 +496,52 @@ pub const Game = struct {
                 .color = common.rgba(255, 215, 110, 255),
                 .kind = .flash,
             });
+        }
+    }
+
+    fn updateDrone(self: *Game, dt: f32, bank: *audio.AudioBank) void {
+        if (!self.drone.active) return;
+
+        self.drone.timer -= dt;
+        self.drone.fire_cooldown = @max(self.drone.fire_cooldown - dt, 0.0);
+        self.drone.beam_timer = @max(self.drone.beam_timer - dt, 0.0);
+        self.drone.orbit_angle += dt * 2.6;
+        self.drone.pulse += dt * 5.0;
+        if (self.drone.timer <= 0.0) {
+            self.drone = .{};
+            return;
+        }
+        if (!self.player.alive) return;
+        if (self.drone.fire_cooldown > 0.0) return;
+
+        const drone_pos = self.dronePosition();
+        var best_asteroid: ?usize = null;
+        var best_asteroid_dist = common.sqr(420.0);
+        for (0..self.asteroids.len) |i| {
+            if (!self.asteroids[i].active) continue;
+            const dist_sq = common.torusDistanceSq(drone_pos, self.asteroids[i].pos);
+            if (dist_sq < best_asteroid_dist) {
+                best_asteroid = i;
+                best_asteroid_dist = dist_sq;
+            }
+        }
+
+        const saucer_limit = common.sqr(460.0);
+        if (self.saucer.active) {
+            const saucer_dist_sq = common.torusDistanceSq(drone_pos, self.saucer.pos);
+            if (saucer_dist_sq < saucer_limit and (best_asteroid == null or saucer_dist_sq < best_asteroid_dist * 0.92)) {
+                self.fireDroneBeam(drone_pos, self.saucer.pos);
+                self.destroySaucer(bank);
+                self.drone.fire_cooldown = 0.62;
+                return;
+            }
+        }
+
+        if (best_asteroid) |index| {
+            const target = self.asteroids[index].pos;
+            self.fireDroneBeam(drone_pos, target);
+            self.destroyAsteroid(index, target, bank);
+            self.drone.fire_cooldown = 0.52;
         }
     }
 
@@ -913,21 +984,60 @@ pub const Game = struct {
 
         self.powerup = .{
             .active = true,
+            .kind = if (self.randRange(0.0, 1.0) < 0.34) .drone else .multishot,
             .pos = common.wrapPoint(pos),
             .vel = common.fromAngle(self.randRange(0.0, common.tau), self.randRange(28.0, 64.0)),
             .life = 8.5,
             .max_life = 8.5,
             .pulse = self.randRange(0.0, common.tau),
         };
-        self.spawnRadialBurst(self.powerup.pos, common.rgba(255, 210, 110, 255), 10, 90.0);
+        self.spawnRadialBurst(self.powerup.pos, powerupColor(self.powerup.kind), 10, 90.0);
     }
 
     fn collectPowerup(self: *Game, bank: *audio.AudioBank) void {
         if (!self.powerup.active) return;
-        self.power_mode_timer = @max(self.power_mode_timer, 10.0);
-        self.spawnRadialBurst(self.powerup.pos, common.rgba(255, 220, 140, 255), 18, 140.0);
+        switch (self.powerup.kind) {
+            .multishot => self.power_mode_timer = @max(self.power_mode_timer, 10.0),
+            .drone => self.activateDrone(),
+        }
+        self.spawnRadialBurst(self.powerup.pos, powerupColor(self.powerup.kind), 18, 140.0);
         audio.playPowerup(bank, 0.28, self.randRange(0.96, 1.08));
         self.powerup = .{};
+    }
+
+    fn activateDrone(self: *Game) void {
+        self.drone.active = true;
+        self.drone.max_timer = 12.0;
+        self.drone.timer = @max(self.drone.timer, self.drone.max_timer);
+        self.drone.orbit_radius = 42.0;
+        self.drone.orbit_angle = self.player.angle - common.pi / 2.0;
+        self.drone.fire_cooldown = @min(self.drone.fire_cooldown, 0.18);
+        self.drone.pulse = self.randRange(0.0, common.tau);
+    }
+
+    fn dronePosition(self: *const Game) common.Vec2 {
+        if (!self.player.alive) return self.player.pos;
+        const orbit = self.drone.orbit_radius + @sin(self.drone.pulse) * 4.0;
+        return common.wrapPoint(common.add(self.player.pos, common.fromAngle(self.drone.orbit_angle, orbit)));
+    }
+
+    fn fireDroneBeam(self: *Game, from: common.Vec2, to: common.Vec2) void {
+        self.drone.beam_timer = 0.11;
+        self.drone.beam_from = from;
+        self.drone.beam_to = to;
+        self.spawnRadialBurst(to, common.rgba(110, 255, 235, 255), 6, 110.0);
+        self.spawnParticle(.{
+            .pos = from,
+            .vel = common.zero(),
+            .angle = 0.0,
+            .spin = 0.0,
+            .size = 8.0,
+            .life = 0.1,
+            .max_life = 0.1,
+            .intensity = 0.95,
+            .color = common.rgba(170, 255, 245, 255),
+            .kind = .flash,
+        });
     }
 
     fn isSpawnSafe(self: *Game) bool {
@@ -1001,6 +1111,8 @@ pub const Game = struct {
         for (self.asteroids) |asteroid| if (asteroid.active) drawAsteroid(asteroid);
         if (self.saucer.active) drawSaucer(self.saucer);
         if (self.player.alive and (self.player.invuln_timer <= 0.0 or @mod(self.display_phase * 12.0, 2.0) < 1.0)) drawShip(self.player);
+        if (self.drone.active and self.player.alive) drawDrone(self.drone, self.dronePosition());
+        if (self.drone.active and self.drone.beam_timer > 0.0) drawDroneBeam(self.drone);
     }
 
     pub fn drawOverlay(self: *const Game, render_w: f32, render_h: f32) void {
@@ -1090,6 +1202,13 @@ fn drawBullet(bullet: Bullet) void {
     common.drawWrappedDot(bullet.pos, 3.4, if (bullet.owner == .player) common.rgba(210, 245, 255, 255) else common.rgba(255, 105, 180, 255), 0.75);
 }
 
+fn powerupColor(kind: PowerupKind) rl.Color {
+    return switch (kind) {
+        .multishot => common.rgba(255, 198, 92, 255),
+        .drone => common.rgba(110, 255, 228, 255),
+    };
+}
+
 fn drawPowerup(powerup: Powerup) void {
     const life_ratio = std.math.clamp(powerup.life / powerup.max_life, 0.0, 1.0);
     const radius = 18.0 + @sin(powerup.pulse) * 2.0;
@@ -1097,13 +1216,22 @@ fn drawPowerup(powerup: Powerup) void {
     const y_offsets = common.wrapOffsets(powerup.pos.y, radius + 10.0, common.world_height);
     for (x_offsets.values[0..x_offsets.len]) |ox| for (y_offsets.values[0..y_offsets.len]) |oy| {
         const pos = common.vec2(powerup.pos.x + ox, powerup.pos.y + oy);
-        const shell = common.rgba(255, 198, 92, @as(u8, @intFromFloat(180.0 * life_ratio)));
-        const core = common.rgba(255, 235, 165, 255);
+        const shell_base = powerupColor(powerup.kind);
+        const shell = common.withAlpha(shell_base, @as(u8, @intFromFloat(180.0 * life_ratio)));
+        const core = if (powerup.kind == .drone) common.rgba(210, 255, 245, 255) else common.rgba(255, 235, 165, 255);
         common.drawGlowDot(pos, 5.0 + @sin(powerup.pulse * 1.8) * 1.2, core, 0.95);
         common.drawGlowLine(common.vec2(pos.x - 11.0, pos.y), common.vec2(pos.x + 11.0, pos.y), 1.1, shell, 0.85);
         common.drawGlowLine(common.vec2(pos.x, pos.y - 11.0), common.vec2(pos.x, pos.y + 11.0), 1.1, shell, 0.85);
-        common.drawGlowLine(common.vec2(pos.x - 8.0, pos.y - 8.0), common.vec2(pos.x + 8.0, pos.y + 8.0), 0.9, shell, 0.65);
-        common.drawGlowLine(common.vec2(pos.x - 8.0, pos.y + 8.0), common.vec2(pos.x + 8.0, pos.y - 8.0), 0.9, shell, 0.65);
+        if (powerup.kind == .drone) {
+            const orbit = 7.0 + @sin(powerup.pulse * 2.0) * 1.4;
+            for (0..3) |i| {
+                const angle = powerup.pulse + @as(f32, @floatFromInt(i)) * (common.tau / 3.0);
+                common.drawGlowDot(common.add(pos, common.fromAngle(angle, orbit)), 2.2, shell_base, 0.8);
+            }
+        } else {
+            common.drawGlowLine(common.vec2(pos.x - 8.0, pos.y - 8.0), common.vec2(pos.x + 8.0, pos.y + 8.0), 0.9, shell, 0.65);
+            common.drawGlowLine(common.vec2(pos.x - 8.0, pos.y + 8.0), common.vec2(pos.x + 8.0, pos.y - 8.0), 0.9, shell, 0.65);
+        }
     };
 }
 
@@ -1173,6 +1301,36 @@ fn drawSaucer(saucer: Saucer) void {
     };
 }
 
+fn drawDrone(drone: Drone, pos: common.Vec2) void {
+    const shell = common.rgba(120, 255, 232, 255);
+    const core = common.rgba(220, 255, 250, 255);
+    const ring = 12.0 + @sin(drone.pulse) * 1.2;
+    const x_offsets = common.wrapOffsets(pos.x, ring + 10.0, common.world_width);
+    const y_offsets = common.wrapOffsets(pos.y, ring + 10.0, common.world_height);
+    for (x_offsets.values[0..x_offsets.len]) |ox| for (y_offsets.values[0..y_offsets.len]) |oy| {
+        const center = common.vec2(pos.x + ox, pos.y + oy);
+        common.drawGlowDot(center, 4.8, core, 0.95);
+        var prev = common.add(center, common.fromAngle(drone.orbit_angle, ring));
+        for (1..7) |i| {
+            const angle = drone.orbit_angle + common.tau * (@as(f32, @floatFromInt(i)) / 6.0);
+            const next = common.add(center, common.fromAngle(angle, ring));
+            common.drawGlowLine(prev, next, 1.0, shell, 0.65);
+            prev = next;
+        }
+        common.drawGlowLine(common.vec2(center.x - 7.0, center.y), common.vec2(center.x + 7.0, center.y), 0.9, shell, 0.85);
+        common.drawGlowLine(common.vec2(center.x, center.y - 7.0), common.vec2(center.x, center.y + 7.0), 0.9, shell, 0.85);
+    };
+}
+
+fn drawDroneBeam(drone: Drone) void {
+    const alpha = std.math.clamp(drone.beam_timer / 0.11, 0.0, 1.0);
+    const color = common.withAlpha(common.rgba(150, 255, 240, 255), @as(u8, @intFromFloat(255.0 * alpha)));
+    const delta = common.torusDelta(drone.beam_from, drone.beam_to);
+    const target = common.add(drone.beam_from, delta);
+    common.drawGlowLine(drone.beam_from, target, 2.1, color, 0.95);
+    common.drawGlowDot(target, 5.0, color, 0.85);
+}
+
 fn drawHud(game: *const Game, render_w: f32, render_h: f32) void {
     const zoom = uiZoom(render_w, render_h);
     var score_buf: [32]u8 = undefined;
@@ -1196,6 +1354,16 @@ fn drawHud(game: *const Game, render_w: f32, render_h: f32) void {
         const bar_y = label_pos.y + 20.0 * zoom;
         rl.drawRectangleRounded(common.rect(bar_x, bar_y, bar_w, bar_h), 0.45, 8, common.rgba(30, 34, 44, 170));
         rl.drawRectangleRounded(common.rect(bar_x, bar_y, bar_w * std.math.clamp(game.power_mode_timer / 10.0, 0.0, 1.0), bar_h), 0.45, 8, common.rgba(255, 190, 95, 220));
+    }
+    if (game.drone.active and game.mode == .playing) {
+        const label_pos = uiPoint(common.world_width * 0.5, if (game.power_mode_timer > 0.0) 124.0 else 78.0, render_w, render_h);
+        font.drawText("DRONE", label_pos, 18.0 * zoom, 5.0 * zoom, 1.1 * zoom, .center, common.rgba(140, 255, 230, 255));
+        const bar_w = 180.0 * zoom;
+        const bar_h = 8.0 * zoom;
+        const bar_x = label_pos.x - bar_w * 0.5;
+        const bar_y = label_pos.y + 20.0 * zoom;
+        rl.drawRectangleRounded(common.rect(bar_x, bar_y, bar_w, bar_h), 0.45, 8, common.rgba(18, 34, 34, 170));
+        rl.drawRectangleRounded(common.rect(bar_x, bar_y, bar_w * std.math.clamp(game.drone.timer / game.drone.max_timer, 0.0, 1.0), bar_h), 0.45, 8, common.rgba(110, 255, 228, 220));
     }
 }
 
