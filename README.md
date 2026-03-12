@@ -1,4 +1,4 @@
-# Asteroids Vector
+# Asteroids
 
 Asteroids clone built with Zig 0.15.1 and `raylib-zig`.
 
