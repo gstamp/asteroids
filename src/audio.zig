@@ -65,6 +65,7 @@ pub const AudioBank = struct {
     death: SoundPool,
     hyperspace: SoundPool,
     extra_life: SoundPool,
+    powerup: SoundPool,
 
     pub fn init(allocator: std.mem.Allocator) !AudioBank {
         rl.initAudioDevice();
@@ -83,6 +84,7 @@ pub const AudioBank = struct {
             .death = try SoundPool.init(allocator, 0.75, synthDeath),
             .hyperspace = try SoundPool.init(allocator, 0.36, synthHyperspace),
             .extra_life = try SoundPool.init(allocator, 0.35, synthExtraLife),
+            .powerup = try SoundPool.init(allocator, 0.32, synthPowerup),
         };
     }
 
@@ -99,6 +101,7 @@ pub const AudioBank = struct {
         self.death.deinit();
         self.hyperspace.deinit();
         self.extra_life.deinit();
+        self.powerup.deinit();
         rl.closeAudioDevice();
     }
 };
@@ -149,6 +152,10 @@ pub fn playHyperspace(self: *AudioBank, volume: f32, pitch: f32) void {
 
 pub fn playExtraLife(self: *AudioBank, volume: f32, pitch: f32) void {
     self.extra_life.play(volume, pitch);
+}
+
+pub fn playPowerup(self: *AudioBank, volume: f32, pitch: f32) void {
+    self.powerup.play(volume, pitch);
 }
 
 fn synthShoot(samples: []i16, sr: f32, variant: usize) void {
@@ -335,5 +342,23 @@ fn synthExtraLife(samples: []i16, sr: f32, variant: usize) void {
         phase += note / sr;
         const env = std.math.exp(-t * 4.2);
         common.writeSynthSample(sample, @sin(phase * common.tau) * env * 0.34);
+    }
+}
+
+fn synthPowerup(samples: []i16, sr: f32, variant: usize) void {
+    const variant_f = @as(f32, @floatFromInt(variant));
+    var phase_a: f32 = 0.0;
+    var phase_b: f32 = 0.0;
+    for (samples, 0..) |*sample, i| {
+        const t = @as(f32, @floatFromInt(i)) / sr;
+        const progress = std.math.clamp(t / 0.32, 0.0, 1.0);
+        const lead = common.lerp(460.0 + variant_f * 18.0, 980.0 + variant_f * 22.0, progress);
+        const shimmer = common.lerp(720.0, 1520.0, progress);
+        phase_a += lead / sr;
+        phase_b += shimmer / sr;
+        const env = std.math.exp(-t * 5.2);
+        const sparkle = common.hashNoise(i * 9, variant) * 0.08;
+        const tone = common.triangleSample(phase_a) * 0.26 + @sin(phase_b * common.tau) * 0.18 + sparkle;
+        common.writeSynthSample(sample, tone * env * 0.46);
     }
 }

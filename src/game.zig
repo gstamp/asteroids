@@ -32,6 +32,15 @@ pub const ParticleKind = enum(u8) {
     flash,
 };
 
+pub const Powerup = struct {
+    active: bool = false,
+    pos: common.Vec2 = common.zero(),
+    vel: common.Vec2 = common.zero(),
+    life: f32 = 0.0,
+    max_life: f32 = 1.0,
+    pulse: f32 = 0.0,
+};
+
 pub const Rift = struct {
     active: bool = false,
     pos: common.Vec2 = common.zero(),
@@ -116,6 +125,7 @@ pub const Game = struct {
     stars: [common.max_stars]Star,
     saucer: Saucer,
     rift: Rift,
+    powerup: Powerup,
     score: i32,
     high_score: i32,
     lives: i32,
@@ -131,6 +141,7 @@ pub const Game = struct {
     display_phase: f32,
     initial_wave_asteroids: i32,
     rift_spawn_timer: f32,
+    power_mode_timer: f32,
 
     pub fn init(seed: u64) Game {
         var game = Game{
@@ -143,6 +154,7 @@ pub const Game = struct {
             .stars = std.mem.zeroes([common.max_stars]Star),
             .saucer = .{},
             .rift = .{},
+            .powerup = .{},
             .score = 0,
             .high_score = 0,
             .lives = 3,
@@ -158,6 +170,7 @@ pub const Game = struct {
             .display_phase = 0.0,
             .initial_wave_asteroids = 4,
             .rift_spawn_timer = 8.0,
+            .power_mode_timer = 0.0,
         };
         game.seedStars();
         game.seedTitleField();
@@ -201,7 +214,9 @@ pub const Game = struct {
         self.heartbeat_high = false;
         self.explosion_flash_intensity = 0.0;
         self.rift = .{};
+        self.powerup = .{};
         self.rift_spawn_timer = self.nextRiftDelay();
+        self.power_mode_timer = 0.0;
         self.player = .{};
         self.player.alive = true;
         self.player.invuln_timer = 2.5;
@@ -219,7 +234,9 @@ pub const Game = struct {
         self.wave_message_timer = 0.0;
         self.saucer_spawn_timer = 99.0;
         self.rift = .{};
+        self.powerup = .{};
         self.rift_spawn_timer = 99.0;
+        self.power_mode_timer = 0.0;
         for (0..7) |_| {
             const pos = common.vec2(self.randRange(0.0, common.world_width), self.randRange(0.0, common.world_height));
             const angle = self.randRange(0.0, common.tau);
@@ -249,6 +266,7 @@ pub const Game = struct {
         self.particles = std.mem.zeroes([common.max_particles]Particle);
         self.saucer = .{};
         self.rift = .{};
+        self.powerup = .{};
     }
 
     fn seedStars(self: *Game) void {
@@ -303,7 +321,9 @@ pub const Game = struct {
 
     fn updatePlayingWorld(self: *Game, dt: f32, allow_saucer_spawn: bool) void {
         self.wave_message_timer = @max(self.wave_message_timer - dt, 0.0);
+        self.power_mode_timer = @max(self.power_mode_timer - dt, 0.0);
         self.updateRift(dt, allow_saucer_spawn);
+        self.updatePowerup(dt);
         self.updateAsteroids(dt);
         if (allow_saucer_spawn and !self.saucer.active) {
             self.saucer_spawn_timer -= dt;
@@ -343,7 +363,8 @@ pub const Game = struct {
         self.player.vel = common.scale(self.player.vel, 0.999);
         self.player.pos = common.wrapPoint(common.add(self.player.pos, common.scale(self.player.vel, dt)));
 
-        if (fire and self.player.fire_cooldown <= 0.0 and self.countBullets(.player) < common.max_player_bullets) {
+        const max_player_bullets: i32 = if (self.power_mode_timer > 0.0) common.max_player_bullets + 2 else common.max_player_bullets;
+        if (fire and self.player.fire_cooldown <= 0.0 and self.countBullets(.player) < max_player_bullets) {
             self.firePlayerBullet(bank);
         }
         if (hyperspace and self.player.hyperspace_cooldown <= 0.0) {
@@ -423,6 +444,36 @@ pub const Game = struct {
         }
     }
 
+    fn updatePowerup(self: *Game, dt: f32) void {
+        if (!self.powerup.active) return;
+        self.powerup.life -= dt;
+        self.powerup.pulse += dt * 4.4;
+        if (self.powerup.life <= 0.0) {
+            self.powerup = .{};
+            return;
+        }
+
+        self.powerup.vel = common.add(self.powerup.vel, common.scale(self.riftAcceleration(self.powerup.pos, 0.42), dt));
+        self.powerup.vel = common.scale(self.powerup.vel, 1.0 - dt * 0.08);
+        self.powerup.pos = common.wrapPoint(common.add(self.powerup.pos, common.scale(self.powerup.vel, dt)));
+
+        if (self.randRange(0.0, 1.0) < dt * 10.0) {
+            const life = self.randRange(0.16, 0.32);
+            self.spawnParticle(.{
+                .pos = self.powerup.pos,
+                .vel = common.fromAngle(self.randRange(0.0, common.tau), self.randRange(8.0, 42.0)),
+                .angle = self.randRange(0.0, common.tau),
+                .spin = self.randRange(-8.0, 8.0),
+                .size = self.randRange(2.0, 4.6),
+                .life = life,
+                .max_life = life,
+                .intensity = self.randRange(0.4, 0.75),
+                .color = common.rgba(255, 215, 110, 255),
+                .kind = .flash,
+            });
+        }
+    }
+
     fn updateRift(self: *Game, dt: f32, allow_spawn: bool) void {
         if (self.rift.active) {
             self.rift.life -= dt;
@@ -460,6 +511,10 @@ pub const Game = struct {
 
     fn updateCollisions(self: *Game, bank: *audio.AudioBank) void {
         self.consumeRiftVictims(bank);
+
+        if (self.player.alive and self.powerup.active and common.torusDistanceSq(self.player.pos, self.powerup.pos) < common.sqr(26.0)) {
+            self.collectPowerup(bank);
+        }
 
         for (&self.bullets) |*bullet| {
             if (!bullet.active) continue;
@@ -564,17 +619,34 @@ pub const Game = struct {
     }
 
     fn firePlayerBullet(self: *Game, bank: *audio.AudioBank) void {
-        const dir = common.fromAngle(self.player.angle, 1.0);
-        const spawn_pos = common.wrapPoint(common.add(self.player.pos, common.scale(dir, 18.0)));
-        const velocity = common.add(self.player.vel, common.scale(dir, 620.0));
+        const multishot = self.power_mode_timer > 0.0;
+        const max_player_bullets: i32 = if (multishot) common.max_player_bullets + 2 else common.max_player_bullets;
+        if (self.countBullets(.player) >= max_player_bullets) return;
 
-        for (&self.bullets) |*bullet| {
-            if (bullet.active) continue;
-            bullet.* = .{ .active = true, .pos = spawn_pos, .vel = velocity, .ttl = 1.15, .owner = .player };
-            self.player.fire_cooldown = 0.18;
-            self.emitShotFlash(spawn_pos, dir, common.rgba(210, 240, 255, 255));
-            audio.playShoot(bank, 0.24, self.randRange(0.94, 1.08));
-            return;
+        var fired_any = false;
+        if (multishot) {
+            for ([_]f32{ -0.18, 0.0, 0.18 }) |offset| {
+                if (self.countBullets(.player) >= max_player_bullets) break;
+                const dir = common.fromAngle(self.player.angle + offset, 1.0);
+                const spawn_pos = common.wrapPoint(common.add(self.player.pos, common.scale(dir, 18.0)));
+                const velocity = common.add(self.player.vel, common.scale(dir, if (offset != 0.0) 600.0 else 620.0));
+                if (!self.spawnBullet(spawn_pos, velocity, 1.15, .player)) continue;
+                self.emitShotFlash(spawn_pos, dir, common.rgba(255, 215, 120, 255));
+                fired_any = true;
+            }
+        } else {
+            const dir = common.fromAngle(self.player.angle, 1.0);
+            const spawn_pos = common.wrapPoint(common.add(self.player.pos, common.scale(dir, 18.0)));
+            const velocity = common.add(self.player.vel, common.scale(dir, 620.0));
+            if (self.spawnBullet(spawn_pos, velocity, 1.15, .player)) {
+                self.emitShotFlash(spawn_pos, dir, common.rgba(210, 240, 255, 255));
+                fired_any = true;
+            }
+        }
+
+        if (fired_any) {
+            self.player.fire_cooldown = if (multishot) 0.24 else 0.18;
+            audio.playShoot(bank, if (multishot) 0.27 else 0.24, if (multishot) self.randRange(1.05, 1.16) else self.randRange(0.94, 1.08));
         }
     }
 
@@ -662,6 +734,7 @@ pub const Game = struct {
             .medium => audio.playBangMedium(bank, 0.22, self.randRange(0.98, 1.12)),
             .small => audio.playBangSmall(bank, 0.20, self.randRange(1.0, 1.18)),
         }
+        self.maybeSpawnPowerup(asteroid, impact_pos);
         if (asteroid.size == .small) return;
 
         const child_size: AsteroidSize = if (asteroid.size == .large) .medium else .small;
@@ -776,6 +849,15 @@ pub const Game = struct {
         return false;
     }
 
+    fn spawnBullet(self: *Game, pos: common.Vec2, vel: common.Vec2, ttl: f32, owner: BulletOwner) bool {
+        for (&self.bullets) |*bullet| {
+            if (bullet.active) continue;
+            bullet.* = .{ .active = true, .pos = pos, .vel = vel, .ttl = ttl, .owner = owner };
+            return true;
+        }
+        return false;
+    }
+
     fn spawnParticle(self: *Game, particle: Particle) void {
         for (&self.particles) |*slot| {
             if (slot.active) continue;
@@ -818,6 +900,34 @@ pub const Game = struct {
 
     fn emitShotFlash(self: *Game, pos: common.Vec2, dir: common.Vec2, color: rl.Color) void {
         self.spawnParticle(.{ .pos = pos, .vel = common.scale(dir, 70.0), .angle = std.math.atan2(dir.y, dir.x), .spin = self.randRange(-14.0, 14.0), .size = 7.0, .life = 0.12, .max_life = 0.12, .intensity = 0.9, .color = color, .kind = .flash });
+    }
+
+    fn maybeSpawnPowerup(self: *Game, asteroid: Asteroid, pos: common.Vec2) void {
+        if (self.powerup.active or self.mode != .playing) return;
+        const chance: f32 = switch (asteroid.size) {
+            .large => 0.0,
+            .medium => 0.12,
+            .small => 0.18,
+        };
+        if (chance <= 0.0 or self.randRange(0.0, 1.0) >= chance) return;
+
+        self.powerup = .{
+            .active = true,
+            .pos = common.wrapPoint(pos),
+            .vel = common.fromAngle(self.randRange(0.0, common.tau), self.randRange(28.0, 64.0)),
+            .life = 8.5,
+            .max_life = 8.5,
+            .pulse = self.randRange(0.0, common.tau),
+        };
+        self.spawnRadialBurst(self.powerup.pos, common.rgba(255, 210, 110, 255), 10, 90.0);
+    }
+
+    fn collectPowerup(self: *Game, bank: *audio.AudioBank) void {
+        if (!self.powerup.active) return;
+        self.power_mode_timer = @max(self.power_mode_timer, 10.0);
+        self.spawnRadialBurst(self.powerup.pos, common.rgba(255, 220, 140, 255), 18, 140.0);
+        audio.playPowerup(bank, 0.28, self.randRange(0.96, 1.08));
+        self.powerup = .{};
     }
 
     fn isSpawnSafe(self: *Game) bool {
@@ -886,6 +996,7 @@ pub const Game = struct {
         drawStars(self);
         if (self.rift.active) drawRift(self.rift, self.display_phase);
         for (self.particles) |particle| if (particle.active) drawParticle(particle);
+        if (self.powerup.active) drawPowerup(self.powerup);
         for (self.bullets) |bullet| if (bullet.active) drawBullet(bullet);
         for (self.asteroids) |asteroid| if (asteroid.active) drawAsteroid(asteroid);
         if (self.saucer.active) drawSaucer(self.saucer);
@@ -979,6 +1090,23 @@ fn drawBullet(bullet: Bullet) void {
     common.drawWrappedDot(bullet.pos, 3.4, if (bullet.owner == .player) common.rgba(210, 245, 255, 255) else common.rgba(255, 105, 180, 255), 0.75);
 }
 
+fn drawPowerup(powerup: Powerup) void {
+    const life_ratio = std.math.clamp(powerup.life / powerup.max_life, 0.0, 1.0);
+    const radius = 18.0 + @sin(powerup.pulse) * 2.0;
+    const x_offsets = common.wrapOffsets(powerup.pos.x, radius + 10.0, common.world_width);
+    const y_offsets = common.wrapOffsets(powerup.pos.y, radius + 10.0, common.world_height);
+    for (x_offsets.values[0..x_offsets.len]) |ox| for (y_offsets.values[0..y_offsets.len]) |oy| {
+        const pos = common.vec2(powerup.pos.x + ox, powerup.pos.y + oy);
+        const shell = common.rgba(255, 198, 92, @as(u8, @intFromFloat(180.0 * life_ratio)));
+        const core = common.rgba(255, 235, 165, 255);
+        common.drawGlowDot(pos, 5.0 + @sin(powerup.pulse * 1.8) * 1.2, core, 0.95);
+        common.drawGlowLine(common.vec2(pos.x - 11.0, pos.y), common.vec2(pos.x + 11.0, pos.y), 1.1, shell, 0.85);
+        common.drawGlowLine(common.vec2(pos.x, pos.y - 11.0), common.vec2(pos.x, pos.y + 11.0), 1.1, shell, 0.85);
+        common.drawGlowLine(common.vec2(pos.x - 8.0, pos.y - 8.0), common.vec2(pos.x + 8.0, pos.y + 8.0), 0.9, shell, 0.65);
+        common.drawGlowLine(common.vec2(pos.x - 8.0, pos.y + 8.0), common.vec2(pos.x + 8.0, pos.y - 8.0), 0.9, shell, 0.65);
+    };
+}
+
 fn drawAsteroid(asteroid: Asteroid) void {
     const color = switch (asteroid.size) {
         .large => common.rgba(190, 220, 255, 255),
@@ -1058,6 +1186,16 @@ fn drawHud(game: *const Game, render_w: f32, render_h: f32) void {
     }
     if (game.rift.active and game.mode == .playing) {
         font.drawText("GRAVITY RIFT", uiPoint(common.world_width * 0.5, 34.0, render_w, render_h), 18.0 * zoom, 5.0 * zoom, 1.1 * zoom, .center, common.rgba(120, 190, 255, 255));
+    }
+    if (game.power_mode_timer > 0.0 and game.mode == .playing) {
+        const label_pos = uiPoint(common.world_width * 0.5, 78.0, render_w, render_h);
+        font.drawText("POWER", label_pos, 18.0 * zoom, 5.0 * zoom, 1.1 * zoom, .center, common.rgba(255, 214, 120, 255));
+        const bar_w = 180.0 * zoom;
+        const bar_h = 8.0 * zoom;
+        const bar_x = label_pos.x - bar_w * 0.5;
+        const bar_y = label_pos.y + 20.0 * zoom;
+        rl.drawRectangleRounded(common.rect(bar_x, bar_y, bar_w, bar_h), 0.45, 8, common.rgba(30, 34, 44, 170));
+        rl.drawRectangleRounded(common.rect(bar_x, bar_y, bar_w * std.math.clamp(game.power_mode_timer / 10.0, 0.0, 1.0), bar_h), 0.45, 8, common.rgba(255, 190, 95, 220));
     }
 }
 
