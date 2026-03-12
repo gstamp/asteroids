@@ -26,6 +26,12 @@ pub const SaucerSize = enum(u8) {
     small,
 };
 
+pub const SaucerKind = enum(u8) {
+    raider,
+    hunter,
+    disruptor,
+};
+
 pub const ParticleKind = enum(u8) {
     shard,
     ember,
@@ -109,6 +115,7 @@ pub const Saucer = struct {
     pos: common.Vec2 = common.zero(),
     vel: common.Vec2 = common.zero(),
     size: SaucerSize = .large,
+    kind: SaucerKind = .raider,
     shot_timer: f32 = 0.0,
     direction_timer: f32 = 0.0,
     hum_timer: f32 = 0.0,
@@ -430,15 +437,15 @@ pub const Game = struct {
         self.saucer.hum_timer -= dt;
 
         if (self.saucer.hum_timer <= 0.0) {
-            audio.playSaucerHum(bank, if (self.saucer.size == .large) 0.16 else 0.20, if (self.saucer.size == .large) 0.8 else 1.3);
+            audio.playSaucerHum(bank, saucerHumVolume(self.saucer.kind), saucerHumPitch(self.saucer.kind));
             self.saucer.hum_timer = 0.26;
         }
 
         if (self.saucer.direction_timer <= 0.0) {
-            self.saucer.direction_timer = self.randRange(1.3, 2.6);
-            self.saucer.vel.y = self.randRange(-70.0, 70.0);
+            self.refreshSaucerDirection();
         }
 
+        self.updateSaucerSteering(dt);
         self.saucer.pos = common.add(self.saucer.pos, common.scale(self.saucer.vel, dt));
         self.saucer.vel = common.add(self.saucer.vel, common.scale(self.riftAcceleration(self.saucer.pos, 0.38), dt));
         if (self.saucer.pos.y < 90.0 or self.saucer.pos.y > common.world_height - 90.0) self.saucer.vel.y *= -1.0;
@@ -451,7 +458,7 @@ pub const Game = struct {
 
         if (self.saucer.shot_timer <= 0.0) {
             self.fireSaucerBullet(bank);
-            self.saucer.shot_timer = if (self.saucer.size == .large) self.randRange(1.1, 1.8) else self.randRange(0.7, 1.1);
+            self.saucer.shot_timer = self.nextSaucerShotDelay();
         }
     }
 
@@ -724,16 +731,32 @@ pub const Game = struct {
     fn fireSaucerBullet(self: *Game, bank: *audio.AudioBank) void {
         if (!self.saucer.active) return;
         const aim_pos = if (self.player.alive) self.player.pos else common.vec2(common.world_width * 0.5, common.world_height * 0.5);
-        var delta = common.torusDelta(self.saucer.pos, aim_pos);
-        delta = common.rotate(delta, if (self.saucer.size == .large) self.randRange(-0.65, 0.65) else self.randRange(-0.18, 0.18));
-        const velocity = common.normalizeOr(delta, common.vec2(1.0, 0.0), if (self.saucer.size == .large) 420.0 else 500.0);
+        const delta = common.torusDelta(self.saucer.pos, aim_pos);
+        const spread = saucerAimSpread(self.saucer.kind);
+        const bullet_speed = saucerBulletSpeed(self.saucer.kind);
+        var fired_any = false;
+        switch (self.saucer.kind) {
+            .disruptor => {
+                for ([_]f32{ -0.24, 0.0, 0.24 }) |extra_offset| {
+                    const rotated = common.rotate(delta, self.randRange(-spread, spread) + extra_offset);
+                    const velocity = common.normalizeOr(rotated, common.vec2(1.0, 0.0), bullet_speed);
+                    if (!self.spawnBullet(common.wrapPoint(self.saucer.pos), velocity, 1.6, .saucer)) continue;
+                    self.emitShotFlash(self.saucer.pos, common.normalizeOr(rotated, common.vec2(1.0, 0.0), 1.0), saucerShotColor(self.saucer.kind));
+                    fired_any = true;
+                }
+            },
+            else => {
+                const rotated = common.rotate(delta, self.randRange(-spread, spread));
+                const velocity = common.normalizeOr(rotated, common.vec2(1.0, 0.0), bullet_speed);
+                if (self.spawnBullet(common.wrapPoint(self.saucer.pos), velocity, 1.6, .saucer)) {
+                    self.emitShotFlash(self.saucer.pos, common.normalizeOr(rotated, common.vec2(1.0, 0.0), 1.0), saucerShotColor(self.saucer.kind));
+                    fired_any = true;
+                }
+            },
+        }
 
-        for (&self.bullets) |*bullet| {
-            if (bullet.active) continue;
-            bullet.* = .{ .active = true, .pos = common.wrapPoint(self.saucer.pos), .vel = velocity, .ttl = 1.6, .owner = .saucer };
-            self.emitShotFlash(self.saucer.pos, common.normalizeOr(delta, common.vec2(1.0, 0.0), 1.0), common.rgba(255, 100, 180, 255));
-            audio.playSaucerFire(bank, 0.22, if (self.saucer.size == .large) 0.94 else 1.16);
-            return;
+        if (fired_any) {
+            audio.playSaucerFire(bank, 0.22, saucerFirePitch(self.saucer.kind));
         }
     }
 
@@ -765,12 +788,12 @@ pub const Game = struct {
     }
 
     fn destroySaucer(self: *Game, bank: *audio.AudioBank) void {
-        const points: i32 = if (self.saucer.size == .large) 200 else 1000;
+        const points = saucerPoints(self.saucer.kind);
         self.awardScore(points, bank);
-        self.spawnRadialBurst(self.saucer.pos, common.rgba(255, 140, 220, 255), if (self.saucer.size == .large) 26 else 22, 180.0);
+        self.spawnRadialBurst(self.saucer.pos, saucerColor(self.saucer.kind), if (self.saucer.size == .large) 26 else 22, 180.0);
         self.saucer.active = false;
         self.explosion_flash_intensity = @max(self.explosion_flash_intensity, 0.25);
-        audio.playBangMedium(bank, 0.25, if (self.saucer.size == .large) 0.8 else 1.2);
+        audio.playBangMedium(bank, 0.25, saucerDeathPitch(self.saucer.kind));
     }
 
     fn destroyAsteroid(self: *Game, index: usize, impact_pos: common.Vec2, bank: *audio.AudioBank) void {
@@ -842,11 +865,11 @@ pub const Game = struct {
         }
 
         if (self.saucer.active and common.torusDistanceSq(self.saucer.pos, self.rift.pos) < common.sqr(core_radius + 10.0)) {
-            self.awardScore(if (self.saucer.size == .large) 300 else 1200, bank);
-            self.spawnRadialBurst(self.saucer.pos, common.rgba(255, 140, 220, 255), if (self.saucer.size == .large) 20 else 24, 165.0);
+            self.awardScore(saucerPoints(self.saucer.kind), bank);
+            self.spawnRadialBurst(self.saucer.pos, saucerColor(self.saucer.kind), if (self.saucer.size == .large) 20 else 24, 165.0);
             self.saucer.active = false;
             self.explosion_flash_intensity = @max(self.explosion_flash_intensity, 0.18);
-            audio.playBangMedium(bank, 0.24, 1.15);
+            audio.playBangMedium(bank, 0.24, saucerDeathPitch(self.saucer.kind));
         }
     }
 
@@ -866,13 +889,62 @@ pub const Game = struct {
 
     fn spawnSaucer(self: *Game) void {
         self.saucer.active = true;
-        self.saucer.size = if (self.wave < 3 or self.randRange(0.0, 1.0) < 0.55) .large else .small;
+        self.saucer.kind = self.pickSaucerKind();
+        self.saucer.size = saucerSizeForKind(self.saucer.kind);
         const from_left = self.randRange(0.0, 1.0) < 0.5;
         self.saucer.pos = common.vec2(if (from_left) -60.0 else common.world_width + 60.0, self.randRange(120.0, common.world_height - 120.0));
-        self.saucer.vel = common.vec2(if (from_left) self.randRange(90.0, 130.0) else -self.randRange(90.0, 130.0), self.randRange(-55.0, 55.0));
-        self.saucer.shot_timer = self.randRange(0.8, 1.4);
-        self.saucer.direction_timer = self.randRange(1.0, 2.0);
+        self.saucer.vel = common.vec2(if (from_left) saucerHorizontalSpeed(self.saucer.kind) else -saucerHorizontalSpeed(self.saucer.kind), self.randRange(-55.0, 55.0));
+        self.refreshSaucerDirection();
+        self.saucer.shot_timer = self.nextSaucerShotDelay();
         self.saucer.hum_timer = 0.05;
+    }
+
+    fn pickSaucerKind(self: *Game) SaucerKind {
+        if (self.wave < 3) return .raider;
+        const roll = self.randRange(0.0, 1.0);
+        if (self.wave < 6) {
+            if (roll < 0.65) return .raider;
+            return .hunter;
+        }
+        if (roll < 0.42) return .raider;
+        if (roll < 0.77) return .hunter;
+        return .disruptor;
+    }
+
+    fn refreshSaucerDirection(self: *Game) void {
+        self.saucer.direction_timer = switch (self.saucer.kind) {
+            .raider => self.randRange(1.3, 2.6),
+            .hunter => self.randRange(0.7, 1.3),
+            .disruptor => self.randRange(0.9, 1.6),
+        };
+        self.saucer.vel.y = switch (self.saucer.kind) {
+            .raider => self.randRange(-70.0, 70.0),
+            .hunter => self.randRange(-42.0, 42.0),
+            .disruptor => self.randRange(-120.0, 120.0),
+        };
+    }
+
+    fn updateSaucerSteering(self: *Game, dt: f32) void {
+        switch (self.saucer.kind) {
+            .raider => {},
+            .hunter => {
+                if (!self.player.alive) return;
+                const delta = common.torusDelta(self.saucer.pos, self.player.pos);
+                self.saucer.vel.y = common.approach(self.saucer.vel.y, std.math.clamp(delta.y * 0.85, -135.0, 135.0), dt * 115.0);
+            },
+            .disruptor => {
+                self.saucer.vel.y += @sin(self.display_phase * 6.0 + self.saucer.pos.x * 0.01) * dt * 180.0;
+                self.saucer.vel.y = std.math.clamp(self.saucer.vel.y, -150.0, 150.0);
+            },
+        }
+    }
+
+    fn nextSaucerShotDelay(self: *Game) f32 {
+        return switch (self.saucer.kind) {
+            .raider => self.randRange(1.1, 1.8),
+            .hunter => self.randRange(0.58, 0.92),
+            .disruptor => self.randRange(1.35, 2.0),
+        };
     }
 
     fn spawnRift(self: *Game) void {
@@ -1285,7 +1357,12 @@ fn drawSaucer(saucer: Saucer) void {
     const scale_factor: f32 = if (saucer.size == .large) 1.0 else 0.72;
     const w = 34.0 * scale_factor;
     const h = 16.0 * scale_factor;
-    const color = if (saucer.size == .large) common.rgba(255, 160, 230, 255) else common.rgba(255, 110, 210, 255);
+    const color = saucerColor(saucer.kind);
+    const accent = switch (saucer.kind) {
+        .raider => common.rgba(255, 220, 245, 255),
+        .hunter => common.rgba(255, 250, 180, 255),
+        .disruptor => common.rgba(150, 255, 245, 255),
+    };
     const radius = w + 6.0;
     const x_offsets = common.wrapOffsets(saucer.pos.x, radius, common.world_width);
     const y_offsets = common.wrapOffsets(saucer.pos.y, h + 6.0, common.world_height);
@@ -1298,6 +1375,107 @@ fn drawSaucer(saucer: Saucer) void {
         common.drawGlowLine(common.vec2(pos.x - w * 0.7, pos.y), common.vec2(pos.x - w * 0.4, pos.y + h), 1.2, color, 0.9);
         common.drawGlowLine(common.vec2(pos.x - w * 0.4, pos.y + h), common.vec2(pos.x + w * 0.4, pos.y + h), 1.2, color, 0.9);
         common.drawGlowLine(common.vec2(pos.x + w * 0.4, pos.y + h), common.vec2(pos.x + w * 0.7, pos.y), 1.2, color, 0.9);
+        switch (saucer.kind) {
+            .raider => {
+                common.drawGlowLine(common.vec2(pos.x - w * 0.2, pos.y - h * 0.35), common.vec2(pos.x + w * 0.2, pos.y - h * 0.35), 1.0, accent, 0.85);
+            },
+            .hunter => {
+                common.drawGlowDot(common.vec2(pos.x, pos.y - h * 0.25), 2.6, accent, 0.85);
+                common.drawGlowLine(common.vec2(pos.x - w * 0.18, pos.y + h * 0.18), common.vec2(pos.x + w * 0.18, pos.y + h * 0.18), 1.0, accent, 0.85);
+            },
+            .disruptor => {
+                common.drawGlowLine(common.vec2(pos.x - w * 0.45, pos.y - h * 0.18), common.vec2(pos.x + w * 0.45, pos.y - h * 0.18), 1.0, accent, 0.8);
+                common.drawGlowLine(common.vec2(pos.x - w * 0.22, pos.y + h * 0.55), common.vec2(pos.x, pos.y + h * 0.1), 1.0, accent, 0.8);
+                common.drawGlowLine(common.vec2(pos.x + w * 0.22, pos.y + h * 0.55), common.vec2(pos.x, pos.y + h * 0.1), 1.0, accent, 0.8);
+            },
+        }
+    };
+}
+
+fn saucerSizeForKind(kind: SaucerKind) SaucerSize {
+    return switch (kind) {
+        .raider, .disruptor => .large,
+        .hunter => .small,
+    };
+}
+
+fn saucerHorizontalSpeed(kind: SaucerKind) f32 {
+    return switch (kind) {
+        .raider => 110.0,
+        .hunter => 155.0,
+        .disruptor => 94.0,
+    };
+}
+
+fn saucerAimSpread(kind: SaucerKind) f32 {
+    return switch (kind) {
+        .raider => 0.65,
+        .hunter => 0.14,
+        .disruptor => 0.24,
+    };
+}
+
+fn saucerBulletSpeed(kind: SaucerKind) f32 {
+    return switch (kind) {
+        .raider => 420.0,
+        .hunter => 540.0,
+        .disruptor => 460.0,
+    };
+}
+
+fn saucerPoints(kind: SaucerKind) i32 {
+    return switch (kind) {
+        .raider => 200,
+        .hunter => 1000,
+        .disruptor => 600,
+    };
+}
+
+fn saucerColor(kind: SaucerKind) rl.Color {
+    return switch (kind) {
+        .raider => common.rgba(255, 160, 230, 255),
+        .hunter => common.rgba(255, 210, 110, 255),
+        .disruptor => common.rgba(120, 255, 232, 255),
+    };
+}
+
+fn saucerShotColor(kind: SaucerKind) rl.Color {
+    return switch (kind) {
+        .raider => common.rgba(255, 100, 180, 255),
+        .hunter => common.rgba(255, 220, 120, 255),
+        .disruptor => common.rgba(120, 255, 232, 255),
+    };
+}
+
+fn saucerHumVolume(kind: SaucerKind) f32 {
+    return switch (kind) {
+        .raider => 0.16,
+        .hunter => 0.20,
+        .disruptor => 0.18,
+    };
+}
+
+fn saucerHumPitch(kind: SaucerKind) f32 {
+    return switch (kind) {
+        .raider => 0.8,
+        .hunter => 1.3,
+        .disruptor => 0.96,
+    };
+}
+
+fn saucerFirePitch(kind: SaucerKind) f32 {
+    return switch (kind) {
+        .raider => 0.94,
+        .hunter => 1.16,
+        .disruptor => 1.04,
+    };
+}
+
+fn saucerDeathPitch(kind: SaucerKind) f32 {
+    return switch (kind) {
+        .raider => 0.8,
+        .hunter => 1.2,
+        .disruptor => 1.0,
     };
 }
 
