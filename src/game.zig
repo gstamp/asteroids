@@ -1171,11 +1171,16 @@ pub const Game = struct {
         return min + self.rng.random().float(f32) * (max - min);
     }
 
-    pub fn drawWorld(self: *const Game) void {
+    pub fn drawBackdrop(self: *const Game) void {
         drawBackground(self);
         rl.beginBlendMode(.additive);
         defer rl.endBlendMode();
         drawStars(self);
+    }
+
+    pub fn drawWorld(self: *const Game) void {
+        rl.beginBlendMode(.additive);
+        defer rl.endBlendMode();
         if (self.rift.active) drawRift(self.rift, self.display_phase);
         for (self.particles) |particle| if (particle.active) drawParticle(particle);
         if (self.powerup.active) drawPowerup(self.powerup);

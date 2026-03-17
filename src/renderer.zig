@@ -41,7 +41,10 @@ pub const Renderer = struct {
     source_rect: rl.Rectangle,
     screen_rect: rl.Rectangle,
     camera: rl.Camera2D,
+    screen_camera: rl.Camera2D,
     scene_target: rl.RenderTexture,
+    persistence_target: rl.RenderTexture,
+    persistence_scratch_target: rl.RenderTexture,
     bloom_horizontal_target: rl.RenderTexture,
     bloom_vertical_target: rl.RenderTexture,
     blur_shader: rl.Shader,
@@ -74,7 +77,15 @@ pub const Renderer = struct {
                 .rotation = 0.0,
                 .zoom = @max(render_wf / common.world_width, render_hf / common.world_height),
             },
+            .screen_camera = rl.Camera2D{
+                .offset = common.vec2(screen_wf * 0.5, screen_hf * 0.5),
+                .target = common.vec2(common.world_width * 0.5, common.world_height * 0.5),
+                .rotation = 0.0,
+                .zoom = @max(screen_wf / common.world_width, screen_hf / common.world_height),
+            },
             .scene_target = try rl.RenderTexture.init(render_w, render_h),
+            .persistence_target = try rl.RenderTexture.init(render_w, render_h),
+            .persistence_scratch_target = try rl.RenderTexture.init(render_w, render_h),
             .bloom_horizontal_target = try rl.RenderTexture.init(render_w, render_h),
             .bloom_vertical_target = try rl.RenderTexture.init(render_w, render_h),
             .blur_shader = try rl.loadShaderFromMemory(null, blur_shader_source_gles2),
@@ -87,6 +98,8 @@ pub const Renderer = struct {
         rl.setShaderValue(renderer.blur_shader, texel_loc, &texel_size, .vec2);
 
         setBloomTextureOptions(renderer.scene_target.texture);
+        setBloomTextureOptions(renderer.persistence_target.texture);
+        setBloomTextureOptions(renderer.persistence_scratch_target.texture);
         setBloomTextureOptions(renderer.bloom_horizontal_target.texture);
         setBloomTextureOptions(renderer.bloom_vertical_target.texture);
 
@@ -97,12 +110,15 @@ pub const Renderer = struct {
         rl.unloadShader(self.blur_shader);
         self.bloom_vertical_target.unload();
         self.bloom_horizontal_target.unload();
+        self.persistence_scratch_target.unload();
+        self.persistence_target.unload();
         self.scene_target.unload();
     }
 
-    pub fn drawFrame(self: *const Renderer, game: *const game_mod.Game) void {
+    pub fn drawFrame(self: *Renderer, game: *const game_mod.Game) void {
         renderScene(self, game);
-        applyBlurPass(self, self.scene_target.texture, self.bloom_horizontal_target, [2]f32{ 1.0, 0.0 });
+        updatePersistence(self);
+        applyBlurPass(self, self.persistence_target.texture, self.bloom_horizontal_target, [2]f32{ 1.0, 0.0 });
         applyBlurPass(self, self.bloom_horizontal_target.texture, self.bloom_vertical_target, [2]f32{ 0.0, 1.0 });
         drawComposite(self, game);
     }
@@ -112,8 +128,7 @@ fn renderScene(renderer: *const Renderer, game: *const game_mod.Game) void {
     renderer.scene_target.begin();
     defer renderer.scene_target.end();
 
-    rl.clearBackground(common.rgba(2, 4, 8, 255));
-    rl.drawRectangleGradientV(0, 0, renderer.render_w, renderer.render_h, common.rgba(5, 10, 18, 255), common.rgba(1, 2, 5, 255));
+    rl.clearBackground(common.rgba(0, 0, 0, 0));
     renderer.camera.begin();
     game.drawWorld();
     renderer.camera.end();
@@ -124,11 +139,33 @@ fn renderScene(renderer: *const Renderer, game: *const game_mod.Game) void {
     }
 }
 
+fn updatePersistence(renderer: *Renderer) void {
+    const frame_dt = std.math.clamp(rl.getFrameTime(), 1.0 / 240.0, 0.05);
+    const retention = @exp(-frame_dt / 0.11);
+    const retained = common.rgba(255, 255, 255, @as(u8, @intFromFloat(retention * 255.0)));
+
+    renderer.persistence_scratch_target.begin();
+    defer renderer.persistence_scratch_target.end();
+
+    rl.clearBackground(common.rgba(0, 0, 0, 0));
+    common.drawRenderTextureTint(renderer.persistence_target.texture, renderer.source_rect, renderer.render_rect, retained);
+    rl.beginBlendMode(.additive);
+    defer rl.endBlendMode();
+    common.drawRenderTextureTint(
+        renderer.scene_target.texture,
+        renderer.source_rect,
+        renderer.render_rect,
+        .white,
+    );
+
+    std.mem.swap(rl.RenderTexture, &renderer.persistence_target, &renderer.persistence_scratch_target);
+}
+
 fn applyBlurPass(renderer: *const Renderer, source: rl.Texture2D, target: rl.RenderTexture, direction: [2]f32) void {
     target.begin();
     defer target.end();
 
-    rl.clearBackground(.black);
+    rl.clearBackground(common.rgba(0, 0, 0, 0));
     rl.beginShaderMode(renderer.blur_shader);
     defer rl.endShaderMode();
 
@@ -143,17 +180,26 @@ fn drawComposite(renderer: *const Renderer, game: *const game_mod.Game) void {
 
     rl.clearBackground(common.rgba(1, 3, 6, 255));
     rl.drawRectangleGradientV(0, 0, renderer.screen_w, renderer.screen_h, common.rgba(5, 10, 18, 255), common.rgba(1, 2, 5, 255));
+    renderer.screen_camera.begin();
+    game.drawBackdrop();
+    renderer.screen_camera.end();
 
     rl.beginBlendMode(.additive);
-    const bloom_alpha = @as(u8, @intFromFloat(170.0 + 22.0 * @sin(game.display_phase * 37.0)));
+    const bloom_alpha = @as(u8, @intFromFloat(150.0 + 18.0 * @sin(game.display_phase * 37.0)));
     common.drawRenderTextureTint(
         renderer.bloom_vertical_target.texture,
         renderer.source_rect,
         renderer.screen_rect,
-        common.rgba(150, 200, 255, bloom_alpha),
+        common.rgba(210, 230, 255, bloom_alpha),
     );
     rl.endBlendMode();
 
+    common.drawRenderTextureTint(
+        renderer.persistence_target.texture,
+        renderer.source_rect,
+        renderer.screen_rect,
+        common.rgba(255, 255, 255, 210),
+    );
     common.drawRenderTexture(renderer.scene_target.texture, renderer.source_rect, renderer.screen_rect);
     game.drawOverlay(renderer.screen_wf, renderer.screen_hf);
 }

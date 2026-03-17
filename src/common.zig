@@ -132,24 +132,54 @@ pub fn withAlpha(color: rl.Color, alpha: u8) rl.Color {
     return rgba(color.r, color.g, color.b, alpha);
 }
 
+fn alphaByte(value: f32) u8 {
+    return @as(u8, @intFromFloat(std.math.clamp(value, 0.0, 255.0)));
+}
+
 /// Draws a soft glowing dot using layered circles.
 pub fn drawGlowDot(pos: Vec2, radius: f32, color: rl.Color, intensity: f32) void {
-    const outer = withAlpha(color, @as(u8, @intFromFloat(std.math.clamp(42.0 * intensity, 0.0, 255.0))));
-    const mid = withAlpha(color, @as(u8, @intFromFloat(std.math.clamp(95.0 * intensity, 0.0, 255.0))));
-    const core = withAlpha(color, @as(u8, @intFromFloat(std.math.clamp(230.0 * intensity, 0.0, 255.0))));
+    const outer = withAlpha(color, alphaByte(42.0 * intensity));
+    const mid = withAlpha(color, alphaByte(95.0 * intensity));
+    const core = withAlpha(color, alphaByte(230.0 * intensity));
     rl.drawCircleV(pos, radius * 3.2, outer);
     rl.drawCircleV(pos, radius * 1.8, mid);
     rl.drawCircleV(pos, @max(radius, 1.0), core);
 }
 
-/// Draws a soft glowing line using layered strokes.
+/// Draws a soft glowing line with a brighter beam core and hotter endpoints.
 pub fn drawGlowLine(a: Vec2, b: Vec2, thickness: f32, color: rl.Color, intensity: f32) void {
-    const outer = withAlpha(color, @as(u8, @intFromFloat(std.math.clamp(30.0 * intensity, 0.0, 255.0))));
-    const middle = withAlpha(color, @as(u8, @intFromFloat(std.math.clamp(74.0 * intensity, 0.0, 255.0))));
-    const core = withAlpha(color, @as(u8, @intFromFloat(std.math.clamp(220.0 * intensity, 0.0, 255.0))));
-    rl.drawLineEx(a, b, thickness * 4.0, outer);
-    rl.drawLineEx(a, b, thickness * 2.4, middle);
-    rl.drawLineEx(a, b, thickness, core);
+    const delta = sub(b, a);
+    const len_sq = lengthSq(delta);
+    if (len_sq <= 0.01) {
+        drawGlowDot(a, @max(thickness * 0.75, 1.0), color, intensity);
+        return;
+    }
+
+    const length = @sqrt(len_sq);
+    const segment_count_i = std.math.clamp(@as(i32, @intFromFloat(@ceil(length / 18.0))), 1, 24);
+    const segment_count: usize = @intCast(segment_count_i);
+    const wide_halo = withAlpha(color, alphaByte(12.0 * intensity));
+    rl.drawLineEx(a, b, thickness * 5.4, wide_halo);
+
+    for (0..segment_count) |i| {
+        const t0 = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(segment_count));
+        const t1 = @as(f32, @floatFromInt(i + 1)) / @as(f32, @floatFromInt(segment_count));
+        const tm = (t0 + t1) * 0.5;
+        const beam_profile = 0.7 + 0.3 * @sin(tm * pi);
+        const segment_intensity = intensity * beam_profile;
+        const segment_a = add(a, scale(delta, t0));
+        const segment_b = add(a, scale(delta, t1));
+        const outer = withAlpha(color, alphaByte(28.0 * segment_intensity));
+        const middle = withAlpha(color, alphaByte(80.0 * segment_intensity));
+        const core = withAlpha(color, alphaByte(228.0 * segment_intensity));
+        rl.drawLineEx(segment_a, segment_b, thickness * 4.1, outer);
+        rl.drawLineEx(segment_a, segment_b, thickness * 2.3, middle);
+        rl.drawLineEx(segment_a, segment_b, thickness, core);
+    }
+
+    const endpoint_glow = intensity * (0.32 + 0.22 * std.math.clamp(length / 90.0, 0.0, 1.0));
+    drawGlowDot(a, @max(thickness * 0.7, 1.0), color, endpoint_glow);
+    drawGlowDot(b, @max(thickness * 0.7, 1.0), color, endpoint_glow);
 }
 
 /// Draws a glowing dot and its wrapped copies when it crosses the world edge.

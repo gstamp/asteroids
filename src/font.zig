@@ -129,12 +129,7 @@ fn seg(ax: f32, ay: f32, bx: f32, by: f32) Segment {
 }
 
 fn drawStroke(a: common.Vec2, b: common.Vec2, thickness: f32, color: rl.Color) void {
-    const halo = common.withAlpha(color, @as(u8, @intFromFloat(std.math.clamp(42.0 + thickness * 14.0, 0.0, 255.0))));
-    const core = common.withAlpha(color, @as(u8, @intFromFloat(std.math.clamp(200.0 + thickness * 18.0, 0.0, 255.0))));
-    rl.drawLineEx(a, b, thickness * 2.1, halo);
-    rl.drawLineEx(a, b, thickness, core);
-    rl.drawCircleV(a, thickness * 0.55, core);
-    rl.drawCircleV(b, thickness * 0.55, core);
+    common.drawGlowLine(a, b, thickness, color, 0.92);
 }
 
 test "measurement grows with more glyphs" {
